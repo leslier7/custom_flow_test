@@ -2,6 +2,7 @@ import os
 import glob
 import sys
 import re
+import json
 from datetime import datetime
 from pathlib import Path
 from librelane.flows import SequentialFlow
@@ -10,7 +11,7 @@ from librelane.steps.openroad import (
     Floorplan, IOPlacement,
     GlobalPlacement, DetailedPlacement,
     CTS, GlobalRouting, DetailedRouting,
-    FillInsertion,
+    FillInsertion, STAMidPNR,
 )
 from librelane.steps.magic import StreamOut, SpiceExtraction
 from librelane.steps.netgen import LVS
@@ -30,7 +31,7 @@ class MyFlow(SequentialFlow):
         Synthesis, Floorplan, IOPlacement,
         GlobalPlacement, DetailedPlacement,
         CTS, GlobalRouting, DetailedRouting,
-        FillInsertion, StreamOut, SpiceExtraction, LVS,
+        FillInsertion, STAMidPNR, StreamOut, SpiceExtraction, LVS,
     ]
 
 
@@ -39,11 +40,13 @@ class MyFlow(SequentialFlow):
 # ---------------------------------------------------------------------------
 
 # OpenROAD: "Design area 123456.78 u^2 45.60% utilization."
-_AREA_OR    = re.compile(r"Design area\s+([\d.]+)\s+u\^2\s+([\d.]+)%")
+_AREA_OR    = re.compile(r"Design area\s+([0-9,]+(?:\.\d+)?)\s+u\^2\s+([0-9,]+(?:\.\d+)?)%")
 # Yosys: "Chip area for module '\Proj2Xcel': 123456.78"
-_AREA_YS    = re.compile(r"Chip area for (?:module|top)\s+'\\?\w+':\s*([\d.]+)")
+_AREA_YS    = re.compile(r"Chip area for (?:module|top)\s+'\\?\w+':\s*([0-9,]+(?:\.\d+)?)")
 # Yosys: "Number of cells: 1234"
-_CELLS      = re.compile(r"Number of cells:\s*(\d+)")
+_CELLS      = re.compile(r"Number of cells:\s*([0-9,]+)")
+# Yosys stat.rpt table row: "15695 1.58E+05 cells"
+_CELLS_ALT  = re.compile(r"^\s*([0-9,]+)\s+[0-9.Ee+\-]+\s+cells\s*$", re.MULTILINE)
 # OpenROAD STA: "wns -0.123" / "tns -4.56" (standalone lines)
 _WNS        = re.compile(r"^\s*wns\s+(-?[\d.]+)", re.MULTILINE)
 _TNS        = re.compile(r"^\s*tns\s+(-?[\d.]+)", re.MULTILINE)
@@ -52,8 +55,8 @@ _WSLACK     = re.compile(r"worst slack\s*[:\s]\s*(-?[\d.]+)", re.IGNORECASE)
 # LVS
 _LVS_PASS   = re.compile(r"Circuits match uniquely", re.IGNORECASE)
 _LVS_FAIL   = re.compile(r"\*\*\* MISMATCH \*\*\*")
-_LVS_DEV    = re.compile(r"Circuit \d+ contains\s+(\d+)\s+devices")
-_LVS_NET    = re.compile(r"Circuit \d+ contains\s+(\d+)\s+nets")
+_LVS_DEV    = re.compile(r"Circuit \d+ contains\s+([0-9,]+)\s+devices")
+_LVS_NET    = re.compile(r"Circuit \d+ contains\s+([0-9,]+)\s+nets")
 
 
 def _read(path: Path) -> str:
@@ -62,9 +65,130 @@ def _read(path: Path) -> str:
     except OSError:
         return ""
 
+def _num_int(s: str) -> int:
+    return int(s.replace(",", "").strip())
+
+def _num_float(s: str) -> float:
+    return float(s.replace(",", "").strip())
+
+def _read_json(path: Path):
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            return json.load(f)
+    except (OSError, ValueError, TypeError):
+        return None
+
+def _latest_step_dir(root: Path, token: str) -> Path | None:
+    candidates = []
+    for d in root.iterdir():
+        if not d.is_dir():
+            continue
+        if token not in d.name.lower():
+            continue
+        try:
+            ordinal = int(d.name.split("-", 1)[0])
+        except (ValueError, IndexError):
+            continue
+        candidates.append((ordinal, d))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0])
+    return candidates[-1][1]
+
+def _extract_last_float(text: str) -> float | None:
+    vals = re.findall(r"(-?\d+(?:\.\d+)?)", text)
+    if not vals:
+        return None
+    try:
+        return float(vals[-1])
+    except ValueError:
+        return None
+
+def _update_timing_from_mapping(mapping, data: dict, source: str) -> bool:
+    """
+    Extract timing values from arbitrary JSON mappings by key name.
+    """
+    if not isinstance(mapping, dict):
+        return False
+
+    updated = False
+    for key, value in mapping.items():
+        if not isinstance(value, (int, float)):
+            continue
+        k = str(key).lower()
+        if "wns" in k:
+            data["wns_ns"] = float(value)
+            data["timing_source"] = source
+            updated = True
+        elif "tns" in k:
+            data["tns_ns"] = float(value)
+            data["timing_source"] = source
+            updated = True
+        elif ("worst" in k and "slack" in k) or k.endswith("slack"):
+            data["wns_ns"] = float(value)
+            data["timing_source"] = source
+            updated = True
+    return updated
+
+def _has_step_directories(path: Path) -> bool:
+    try:
+        return any(
+            entry.is_dir() and entry.name and entry.name[0].isdigit()
+            for entry in path.iterdir()
+        )
+    except OSError:
+        return False
+
+def _resolve_run_directory(run_root: Path) -> Path | None:
+    """
+    Return the directory that contains numbered flow step folders.
+    Supports both layouts:
+      - build/flow/<step folders>
+      - build/flow/<run name>/<step folders>
+    """
+    if not run_root.is_dir():
+        return None
+
+    if _has_step_directories(run_root):
+        return run_root
+
+    candidates = [child for child in run_root.iterdir() if child.is_dir()]
+    run_candidates = [child for child in candidates if _has_step_directories(child)]
+    if not run_candidates:
+        return None
+    return max(run_candidates, key=lambda p: p.stat().st_mtime)
+
+def _load_clock_period_ns(config_path: Path, default: float = 10.0) -> float:
+    """
+    Read CLOCK_PERIOD from config.yaml without extra dependencies.
+    """
+    text = _read(config_path)
+    if not text:
+        return default
+    m = re.search(r"^\s*CLOCK_PERIOD\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*$", text, re.MULTILINE)
+    if not m:
+        return default
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return default
+
+def _run_is_complete(run_root: Path) -> bool:
+    return (run_root / "final" / "metrics.json").is_file()
+
+def _has_explicit_sta_reports(run_root: Path) -> bool:
+    if not run_root.is_dir():
+        return False
+    for step_dir in run_root.iterdir():
+        if not (step_dir.is_dir() and "sta" in step_dir.name.lower()):
+            continue
+        if any(step_dir.rglob("*.rpt")):
+            return True
+    return False
 
 def write_summary(run_dir: str, design_name: str, clock_period_ns: float) -> None:
     root = Path(run_dir)
+    final_metrics = _read_json(root / "final" / "metrics.json")
 
     data: dict = {
         "synth_area_um2": None,
@@ -78,7 +202,29 @@ def write_summary(run_dir: str, design_name: str, clock_period_ns: float) -> Non
         "lvs_nets": [],      # [c1, c2]
         "area_source": None,
         "timing_source": None,
+        "used_final_metrics": False,
+        "parsed_files": 0,
+        "steps_scanned": 0,
     }
+
+    # Prefer final metrics JSON for canonical post-run layout/util/cell count.
+    if isinstance(final_metrics, dict):
+        if isinstance(final_metrics.get("design__instance__count__stdcell"), (int, float)):
+            data["synth_cells"] = int(final_metrics["design__instance__count__stdcell"])
+        elif isinstance(final_metrics.get("design__instance__count"), (int, float)):
+            data["synth_cells"] = int(final_metrics["design__instance__count"])
+
+        if isinstance(final_metrics.get("design__core__area"), (int, float)):
+            data["layout_area_um2"] = float(final_metrics["design__core__area"])
+            data["area_source"] = "final/metrics.json:design__core__area"
+
+        if isinstance(final_metrics.get("design__instance__utilization"), (int, float)):
+            data["utilization_pct"] = float(final_metrics["design__instance__utilization"]) * 100.0
+            if data["area_source"] is None:
+                data["area_source"] = "final/metrics.json:design__instance__utilization"
+
+        if data["synth_cells"] is not None or data["layout_area_um2"] is not None or data["utilization_pct"] is not None:
+            data["used_final_metrics"] = True
 
     # Walk step dirs in sorted order so later (post-route) values win.
     step_dirs = sorted(
@@ -87,6 +233,7 @@ def write_summary(run_dir: str, design_name: str, clock_period_ns: float) -> Non
     )
 
     for step_dir in step_dirs:
+        data["steps_scanned"] += 1
         is_synth = "synth" in step_dir.name.lower() or "yosys" in step_dir.name.lower()
         is_lvs   = "lvs"   in step_dir.name.lower() or "netgen" in step_dir.name.lower()
 
@@ -95,27 +242,44 @@ def write_summary(run_dir: str, design_name: str, clock_period_ns: float) -> Non
                 text = _read(f)
                 if not text:
                     continue
+                data["parsed_files"] += 1
+                lower_name = f.name.lower()
 
                 # Yosys area + cell count (only from synthesis step)
                 if is_synth:
                     if m := _AREA_YS.search(text):
-                        data["synth_area_um2"] = float(m.group(1))
+                        data["synth_area_um2"] = _num_float(m.group(1))
                     if m := _CELLS.search(text):
-                        data["synth_cells"] = int(m.group(1))
+                        data["synth_cells"] = _num_int(m.group(1))
+                    elif m := _CELLS_ALT.search(text):
+                        data["synth_cells"] = _num_int(m.group(1))
 
                 # OpenROAD layout area (take last occurrence across all steps)
                 if m := _AREA_OR.search(text):
-                    data["layout_area_um2"] = float(m.group(1))
-                    data["utilization_pct"]  = float(m.group(2))
+                    data["layout_area_um2"] = _num_float(m.group(1))
+                    data["utilization_pct"]  = _num_float(m.group(2))
                     data["area_source"] = step_dir.name
 
                 # Timing — prefer explicit "wns/tns" lines, fall back to "worst slack"
                 for pat in (_WNS, _WSLACK):
                     for m in pat.finditer(text):
                         data["wns_ns"] = float(m.group(1))
-                        data["timing_source"] = step_dir.name
+                        data["timing_source"] = str(f.relative_to(root))
                 for m in _TNS.finditer(text):
                     data["tns_ns"] = float(m.group(1))
+                    data["timing_source"] = str(f.relative_to(root))
+
+                # Handle explicit STA reports such as wns.max.rpt / tns.max.rpt
+                if "wns" in lower_name:
+                    nums = re.findall(r"(-?\d+(?:\.\d+)?)", text)
+                    if nums:
+                        data["wns_ns"] = float(nums[-1])
+                        data["timing_source"] = str(f.relative_to(root))
+                if "tns" in lower_name:
+                    nums = re.findall(r"(-?\d+(?:\.\d+)?)", text)
+                    if nums:
+                        data["tns_ns"] = float(nums[-1])
+                        data["timing_source"] = str(f.relative_to(root))
 
                 # LVS (only from LVS step)
                 if is_lvs:
@@ -126,9 +290,64 @@ def write_summary(run_dir: str, design_name: str, clock_period_ns: float) -> Non
                     devs = _LVS_DEV.findall(text)
                     nets = _LVS_NET.findall(text)
                     if len(devs) >= 2:
-                        data["lvs_devices"] = [int(devs[0]), int(devs[1])]
+                        data["lvs_devices"] = [_num_int(devs[0]), _num_int(devs[1])]
                     if len(nets) >= 2:
-                        data["lvs_nets"] = [int(nets[0]), int(nets[1])]
+                        data["lvs_nets"] = [_num_int(nets[0]), _num_int(nets[1])]
+
+    # Additional pass: scan generated JSON reports for post-PNR and STA metrics.
+    json_files = sorted(root.rglob("*.json"))
+    for jf in json_files:
+        metrics = _read_json(jf)
+        if not isinstance(metrics, dict):
+            continue
+
+        # Prefer post-PNR values from any metrics-like report (final and per-step).
+        if isinstance(metrics.get("design__core__area"), (int, float)):
+            data["layout_area_um2"] = float(metrics["design__core__area"])
+            data["area_source"] = str(jf.relative_to(root))
+        if isinstance(metrics.get("design__instance__utilization"), (int, float)):
+            data["utilization_pct"] = float(metrics["design__instance__utilization"]) * 100.0
+            if data["area_source"] is None:
+                data["area_source"] = str(jf.relative_to(root))
+
+        # Gather timing from any STA-oriented metric keys.
+        _update_timing_from_mapping(metrics, data, str(jf.relative_to(root)))
+
+    # Deterministic overrides from latest explicit step artifacts.
+    latest_synth = _latest_step_dir(root, "yosys-synthesis")
+    if latest_synth is not None:
+        stat_rpt = latest_synth / "reports" / "stat.rpt"
+        stat_text = _read(stat_rpt)
+        if stat_text:
+            if m := _AREA_YS.search(stat_text):
+                data["synth_area_um2"] = _num_float(m.group(1))
+            if m := _CELLS.search(stat_text):
+                data["synth_cells"] = _num_int(m.group(1))
+            elif m := _CELLS_ALT.search(stat_text):
+                data["synth_cells"] = _num_int(m.group(1))
+
+    latest_fill = _latest_step_dir(root, "openroad-fillinsertion")
+    if latest_fill is not None:
+        fill_metrics = _read_json(latest_fill / "or_metrics_out.json")
+        if isinstance(fill_metrics, dict):
+            # Use post-PNR std-cell area for apples-to-apples with synthesis area.
+            if isinstance(fill_metrics.get("design__instance__area__stdcell"), (int, float)):
+                data["layout_area_um2"] = float(fill_metrics["design__instance__area__stdcell"])
+            elif isinstance(fill_metrics.get("design__instance__area"), (int, float)):
+                data["layout_area_um2"] = float(fill_metrics["design__instance__area"])
+            if isinstance(fill_metrics.get("design__instance__utilization"), (int, float)):
+                data["utilization_pct"] = float(fill_metrics["design__instance__utilization"]) * 100.0
+
+    latest_sta = _latest_step_dir(root, "openroad-stamidpnr")
+    if latest_sta is not None:
+        wns_text = _read(latest_sta / "wns.max.rpt")
+        tns_text = _read(latest_sta / "tns.max.rpt")
+        if wns_text:
+            if v := _extract_last_float(wns_text):
+                data["wns_ns"] = v
+        if tns_text:
+            if v := _extract_last_float(tns_text):
+                data["tns_ns"] = v
 
     # ------------------------------------------------------------------
     # Format
@@ -138,6 +357,10 @@ def write_summary(run_dir: str, design_name: str, clock_period_ns: float) -> Non
         f"  LibreLane Flow Summary — {design_name}",
         f"  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "=" * 60,
+        "",
+        f"  Run directory: {root}",
+        f"  Steps scanned: {data['steps_scanned']}",
+        f"  Files parsed : {data['parsed_files']}",
         "",
         "--- Synthesis ---",
     ]
@@ -156,8 +379,10 @@ def write_summary(run_dir: str, design_name: str, clock_period_ns: float) -> Non
 
     if data["layout_area_um2"] is not None:
         lines.append(f"  Design area : {data['layout_area_um2']:,.2f} um^2")
-        lines.append(f"  Utilization : {data['utilization_pct']:.2f}%")
-        lines.append(f"  (from step  : {data['area_source']})")
+        if data["utilization_pct"] is not None:
+            lines.append(f"  Utilization : {data['utilization_pct']:.2f}%")
+        else:
+            lines.append("  Utilization : (not found)")
     else:
         lines.append("  Design area : (not found)")
 
@@ -167,17 +392,14 @@ def write_summary(run_dir: str, design_name: str, clock_period_ns: float) -> Non
     if data["wns_ns"] is not None:
         slack_ok = data["wns_ns"] >= 0.0
         flag = "MET" if slack_ok else "VIOLATED"
-        lines.append(f"  WNS         : {data['wns_ns']:+.3f} ns  [{flag}]")
+        lines.append(f"  Worst negative slack : {data['wns_ns']:+.3f} ns  [{flag}]")
     else:
-        lines.append("  WNS         : (not found)")
+        lines.append("  Worst negative slack : (not found)")
 
     if data["tns_ns"] is not None:
-        lines.append(f"  TNS         : {data['tns_ns']:+.3f} ns")
+        lines.append(f"  Total negative slack : {data['tns_ns']:+.3f} ns")
     else:
-        lines.append("  TNS         : (not found)")
-
-    if data["timing_source"]:
-        lines.append(f"  (from step  : {data['timing_source']})")
+        lines.append("  Total negative slack : (not found)")
 
     lines += ["", "--- LVS ---"]
 
@@ -208,40 +430,26 @@ def write_summary(run_dir: str, design_name: str, clock_period_ns: float) -> Non
 
 if __name__ == "__main__":
     fresh = "--fresh" in sys.argv
-    run_dir = "build/flow"
-    has_previous = os.path.isdir(run_dir) and any(
-        d.startswith(("0", "1", "2", "3"))
-        for d in os.listdir(run_dir)
-    ) if os.path.isdir(run_dir) else False
+    base_dir = Path(__file__).resolve().parent
+    run_root = base_dir / "build" / "flow"
+    run_dir = str(run_root)
+    has_previous = _resolve_run_directory(run_root) is not None
 
     flow = MyFlow("config.yaml", pdk_root=get_pdk_root())
+    run_complete = _run_is_complete(run_root)
+    sta_reports_present = _has_explicit_sta_reports(run_root)
 
-    if not fresh and has_previous:
-        flow.start(_force_run_dir=run_dir, last_run=True, overwrite=True)
-    else:
+    # NOTE:
+    # With a fixed custom run directory, repeated start() calls append a new
+    # sequence of steps. For non-fresh invocations, keep existing completed
+    # results instead of launching another full pass.
+    if fresh:
         flow.start(_force_run_dir=run_dir, overwrite=True)
+    elif (not run_complete) or (not sta_reports_present):
+        flow.start(_force_run_dir=run_dir, overwrite=False)
+    else:
+        print(f"[flow] Existing completed run found at {run_root}; skipping flow execution.")
 
-    write_summary(run_dir, design_name="Proj2Xcel", clock_period_ns=10.0)[summary] Written to build/flow/summary.txt
-============================================================
-  LibreLane Flow Summary — Proj2Xcel
-  Generated: 2026-05-07 00:28:20
-============================================================
-
---- Synthesis ---
-  Cell count  : (not found)
-  Yosys area  : 19,228.44 um^2  (pre-placement estimate)
-
---- Layout ---
-  Design area : (not found)
-
---- Timing (post-route) ---
-  Clock period: 10.00 ns
-  WNS         : (not found)
-  TNS         : (not found)
-
---- LVS ---
-  Status      : FAIL  *** MISMATCH ***
-  Devices     : layout=16,329  schematic=15,886  [MISMATCH]
-  Nets        : layout=14,367  schematic=15,894  [MISMATCH]
-
-============================================================
+    summary_dir = _resolve_run_directory(run_root) or run_root
+    clock_period_ns = _load_clock_period_ns(base_dir / "config.yaml")
+    write_summary(str(summary_dir), design_name="Proj2Xcel", clock_period_ns=clock_period_ns)
