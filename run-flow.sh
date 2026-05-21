@@ -1,13 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Pass --fresh to start over, otherwise resumes last run
-FRESH=${1:-""}
+[ -z "${IN_NIX_SHELL:-}" ] && exec nix develop "$SCRIPT_DIR" --command bash "$0" "$@"
 
 echo "=== LibreLane flow ==="
-if [ "$FRESH" = "--fresh" ]; then
-    python "$SCRIPT_DIR/flow.py" --fresh
-else
-    python "$SCRIPT_DIR/flow.py"
-fi
+python "$SCRIPT_DIR/flow.py" "$@"

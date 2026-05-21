@@ -1,6 +1,5 @@
 import os
 import glob
-import sys
 import re
 import json
 from datetime import datetime
@@ -11,7 +10,7 @@ from librelane.steps.openroad import (
     Floorplan, IOPlacement,
     GlobalPlacement, DetailedPlacement,
     CTS, GlobalRouting, DetailedRouting,
-    FillInsertion, STAMidPNR,
+    FillInsertion, STAMidPNR, WriteViews,
 )
 from librelane.steps.magic import StreamOut, SpiceExtraction
 from librelane.steps.netgen import LVS
@@ -31,7 +30,7 @@ class MyFlow(SequentialFlow):
         Synthesis, Floorplan, IOPlacement,
         GlobalPlacement, DetailedPlacement,
         CTS, GlobalRouting, DetailedRouting,
-        FillInsertion, STAMidPNR, StreamOut, SpiceExtraction, LVS,
+        FillInsertion, STAMidPNR, WriteViews, StreamOut, SpiceExtraction, LVS,
     ]
 
 
@@ -172,19 +171,6 @@ def _load_clock_period_ns(config_path: Path, default: float = 10.0) -> float:
         return float(m.group(1))
     except ValueError:
         return default
-
-def _run_is_complete(run_root: Path) -> bool:
-    return (run_root / "final" / "metrics.json").is_file()
-
-def _has_explicit_sta_reports(run_root: Path) -> bool:
-    if not run_root.is_dir():
-        return False
-    for step_dir in run_root.iterdir():
-        if not (step_dir.is_dir() and "sta" in step_dir.name.lower()):
-            continue
-        if any(step_dir.rglob("*.rpt")):
-            return True
-    return False
 
 def write_summary(run_dir: str, design_name: str, clock_period_ns: float) -> None:
     root = Path(run_dir)
@@ -428,28 +414,45 @@ def write_summary(run_dir: str, design_name: str, clock_period_ns: float) -> Non
 
 # ---------------------------------------------------------------------------
 
+def _chip_io_overrides(pdk_root: str) -> dict:
+    io_ref = Path(pdk_root) / "sky130A" / "libs.ref" / "sky130_fd_io"
+    return {
+        "EXTRA_LEFS": [
+            str(io_ref / "lef" / "sky130_fd_io.lef"),
+            str(io_ref / "lef" / "sky130_ef_io.lef"),
+        ],
+        "EXTRA_GDS_FILES": [
+            str(io_ref / "gds" / "sky130_fd_io.gds"),
+        ],
+        "VERILOG_FILES_BLACKBOX": [
+            str(io_ref / "verilog" / "sky130_fd_io__blackbox.v"),
+            str(io_ref / "verilog" / "sky130_ef_io.v"),
+        ],
+    }
+
 if __name__ == "__main__":
-    fresh = "--fresh" in sys.argv
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--chip", action="store_true", help="Build with IO pads (chip-level)")
+    args = parser.parse_args()
+
     base_dir = Path(__file__).resolve().parent
-    run_root = base_dir / "build" / "flow"
-    run_dir = str(run_root)
-    has_previous = _resolve_run_directory(run_root) is not None
+    pdk_root = get_pdk_root()
 
-    flow = MyFlow("config.yaml", pdk_root=get_pdk_root())
-    run_complete = _run_is_complete(run_root)
-    sta_reports_present = _has_explicit_sta_reports(run_root)
-
-    # NOTE:
-    # With a fixed custom run directory, repeated start() calls append a new
-    # sequence of steps. For non-fresh invocations, keep existing completed
-    # results instead of launching another full pass.
-    if fresh:
-        flow.start(_force_run_dir=run_dir, overwrite=True)
-    elif (not run_complete) or (not sta_reports_present):
-        flow.start(_force_run_dir=run_dir, overwrite=False)
+    if args.chip:
+        config_file = "config_chip.yaml"
+        run_root = base_dir / "build" / "flow_chip"
+        design_name = "Proj2Xcel_chip"
+        config = [config_file, _chip_io_overrides(pdk_root)]
     else:
-        print(f"[flow] Existing completed run found at {run_root}; skipping flow execution.")
+        config_file = "config.yaml"
+        run_root = base_dir / "build" / "flow"
+        design_name = "Proj2Xcel"
+        config = config_file
+
+    flow = MyFlow(config, pdk_root=pdk_root)
+    flow.start(_force_run_dir=str(run_root), overwrite=True)
 
     summary_dir = _resolve_run_directory(run_root) or run_root
-    clock_period_ns = _load_clock_period_ns(base_dir / "config.yaml")
-    write_summary(str(summary_dir), design_name="Proj2Xcel", clock_period_ns=clock_period_ns)
+    clock_period_ns = _load_clock_period_ns(base_dir / config_file)
+    write_summary(str(summary_dir), design_name=design_name, clock_period_ns=clock_period_ns)

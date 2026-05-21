@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -z "${IN_NIX_SHELL:-}" ] && exec nix develop "$SCRIPT_DIR" --command bash "$0" "$@"
 
 GDS=$(find "$SCRIPT_DIR/build/flow" -name "*.gds" | sort | tail -1)
 LYP=$(find "$HOME/.ciel" -name "sky130A.lyp" | head -1)
