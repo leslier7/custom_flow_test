@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+STEP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STEP_NAME="$(basename "$STEP_DIR")"
+BUILD_DIR="$(dirname "$STEP_DIR")"
+REPO_ROOT="{{ repo_root }}"
+[ -z "${IN_NIX_SHELL:-}" ] && exec nix develop "$REPO_ROOT" --command bash "$0" "$@"
+
+echo "=== LibreLane flow (chip core: {{ chip.design_name }}) ==="
+python "$REPO_ROOT/flow.py" \
+  --config "$STEP_DIR/config.yaml" \
+  --run-root "$STEP_DIR/run" \
+  --design-name "{{ chip.design_name }}" \
+  --summary-out "$BUILD_DIR/summary-$STEP_NAME.txt" \
+  --flow macro

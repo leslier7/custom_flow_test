@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+STEP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="{{ repo_root }}"
+[ -z "${IN_NIX_SHELL:-}" ] && exec nix develop "$REPO_ROOT" --command bash "$0" "$@"
+
+echo "=== sv2v (core: {{ design_name }}) ==="
+sv2v {% for d in synth_defines %}-D {{ d }} {% endfor %}\
+  "{{ sv2v_in }}" \
+  -w "{{ sv2v_out }}"
+{% if has_chip %}
+echo "=== sv2v (chip core: {{ chip.design_name }}) ==="
+sv2v -D {{ chip.sv2v_define }} \
+  -I "{{ chip.include_dir }}" \
+  "{{ chip.sv2v_top }}" \
+  -w "{{ chip.sv2v_out }}"
+{% endif %}

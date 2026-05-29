@@ -1,0 +1,36 @@
+DESIGN_NAME: {{ wrapper.design_name }}
+PDK: {{ pdk }}
+VERILOG_FILES:
+{% for f in wrapper.verilog_files %}
+  - {{ f }}
+{% endfor %}
+EXTRA_VERILOG_MODELS:
+{% for f in wrapper.extra_verilog_models %}
+  - {{ f }}
+{% endfor %}
+EXTRA_LEFS:
+{% for f in wrapper.extra_lefs %}
+  - {{ f }}
+{% endfor %}
+EXTRA_GDS:
+{% for f in wrapper.extra_gds %}
+  - {{ f }}
+{% endfor %}
+
+FP_SIZING: absolute
+DIE_AREA: {{ wrapper.die_area }}
+CORE_AREA: {{ wrapper.core_area }}
+
+MACRO_PLACEMENT_CFG: dir::{{ wrapper.macro_placement_cfg }}
+
+{% if clock_port %}
+CLOCK_PORT: {{ clock_port }}
+CLOCK_PERIOD: {{ clock_period }}
+{% endif %}
+
+MAGIC_EXT_USE_GDS: true
+LVS_INCLUDE_MARCO_NETLISTS: true
+LVS_IGNORE_CELLS:
+{% for cell in lvs_ignore_cells_resolved %}
+  - {{ cell }}
+{% endfor %}

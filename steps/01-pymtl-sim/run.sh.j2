@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+STEP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="{{ repo_root }}"
+[ -z "${IN_NIX_SHELL:-}" ] && exec nix develop "$REPO_ROOT" --command bash "$0" "$@"
+
+# Put verilator's pkgconfig on PKG_CONFIG_PATH so PyMTL3 can find it. The .pc file
+# lives under <prefix>/share/pkgconfig, which is NOT searched by default. Derive the
+# prefix from the verilator binary on PATH (avoids hardcoding a /nix/store hash).
+VERILATOR_BIN="$(command -v verilator || true)"
+if [ -n "$VERILATOR_BIN" ]; then
+  VERILATOR_PREFIX="$(dirname "$(dirname "$(readlink -f "$VERILATOR_BIN")")")"
+  export PKG_CONFIG_PATH="${VERILATOR_PREFIX}/share/pkgconfig:${PKG_CONFIG_PATH:-}"
+fi
+export PYTHONDONTWRITEBYTECODE=1
+
+echo "=== PyMTL3 --test-verilog ({{ design_name }}) ==="
+# Run from STEP_DIR so PyMTL3 writes {{ design_name }}_noparam*.v (incl. the pickled
+# Verilog the next step consumes) into this step directory.
+cd "$STEP_DIR"
+PYTHONPATH="$REPO_ROOT" python3.11 -m pytest \
+  "{{ pymtl_test }}" \
+  --test-verilog --dump-vtb -v --tb=short

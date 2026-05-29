@@ -1,0 +1,32 @@
+DESIGN_NAME: {{ design_name }}
+PDK: {{ pdk }}
+{% if std_cell_library %}
+STD_CELL_LIBRARY: {{ std_cell_library }}
+{% endif %}
+VERILOG_FILES:
+{% for f in verilog_files %}
+  - {{ f }}
+{% endfor %}
+VERILOG_INCLUDE_DIRS:
+{% for d in verilog_include_dirs %}
+  - {{ d }}
+{% endfor %}
+{% if clock_port %}
+CLOCK_PORT: {{ clock_port }}
+CLOCK_PERIOD: {{ clock_period }}
+{% endif %}
+{% if synth_defines %}
+SYNTH_DEFINES:
+{% for d in synth_defines %}
+  - {{ d }}
+{% endfor %}
+{% endif %}
+
+# LVS robustness knobs
+MAGIC_EXT_USE_GDS: true
+# NOTE: variable name is spelled MARCO in LibreLane 3.0.3
+LVS_INCLUDE_MARCO_NETLISTS: true
+LVS_IGNORE_CELLS:
+{% for cell in lvs_ignore_cells_resolved %}
+  - {{ cell }}
+{% endfor %}

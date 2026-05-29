@@ -1,0 +1,46 @@
+# proj2 vector accelerator — full 3-stage hardening flow.
+# Generate with:  pyhflow designs/proj2-xcel.yml --out-dir build-proj2
+# All source paths are relative to the repo root.
+
+design_name: Proj2Xcel
+pdk: sky130A
+
+clock_port: clk
+clock_period: 30
+synth_defines:
+  - SYNTHESIS
+
+# PyMTL3 test that emits the pickled Verilog (step 01).
+pymtl_test: proj2/test/Proj2Xcel_test.py
+verilog_include_dirs:
+  - "."
+
+steps:
+  - 01-pymtl-sim
+  - 02-sv2v
+  - 03-librelane-core
+  - 04-librelane-chip
+  - 05-librelane-wrapper
+
+# Stage 2: chip core (SPI + DebugUnit + Proj2Xcel macro, no IO cells).
+# Hardened from the hand-written SystemVerilog (not via PyMTL3), with the Stage 1
+# core hardened as a black-box macro.
+chip:
+  design_name: proj2_Proj2XcelChip
+  sv2v_top: proj2/Proj2XcelChip.v
+  sv2v_define: PROJ2XCEL_BLACKBOX
+  include_dir: proj2
+  sv2v_out: Proj2XcelChipCore.v          # written into step 02 output dir
+  die_area: [0, 0, 760, 760]
+  core_area: [10.88, 10.88, 749.12, 749.12]
+  macro_placement_cfg: macro_placement.cfg
+
+# Stage 3: IO pad ring wrapping the Stage 2 macro. chip_top.v is plain Verilog
+# (no sv2v). sky130_fd_io LEF/GDS/verilog are resolved from the PDK root.
+wrapper:
+  design_name: chip_top
+  verilog_files:
+    - verilog/rtl/chip_top.v
+  die_area: [0, 0, 1280, 1280]
+  core_area: [200, 200, 1080, 1080]
+  macro_placement_cfg: macro_placement_wrapper.cfg

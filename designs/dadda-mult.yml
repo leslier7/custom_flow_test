@@ -1,0 +1,26 @@
+# dadda_mult (TapeoutGroup14) — 4x4 unsigned multiplier.
+#
+# WORK IN PROGRESS / NOT VALIDATED. This file is a starter that demonstrates the
+# simple path: a plain-Verilog, combinational design with no PyMTL3 sim and no
+# sv2v step (just the LibreLane hardening step). Adjust before relying on it.
+#
+# Generate with:  pyhflow designs/dadda-mult.yml --out-dir build-dadda
+
+design_name: TapeoutGroup14
+
+# The design comments target "TSMC 180nm"; gf180mcuD is the open 180nm PDK.
+# NOTE: gf180mcuD end-to-end is a known blocker in this repo (see IMPLEMENT doc).
+pdk: gf180mcuD
+
+# TapeoutGroup14 is purely combinational (no clock port). With no clock_port set,
+# the generated config omits CLOCK_PORT/CLOCK_PERIOD. A real run may still need a
+# (virtual) clock configured — revisit when this design is taken through the flow.
+
+# No PyMTL3 model and no sv2v: feed the Verilog straight to LibreLane.
+steps:
+  - 03-librelane-core
+
+verilog_files:
+  - dadda_mult/TapeoutGroup14.v
+verilog_include_dirs:
+  - dadda_mult

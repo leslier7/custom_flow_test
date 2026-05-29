@@ -16,17 +16,19 @@ from librelane.steps.odb import ManualMacroPlacement
 from librelane.steps.magic import StreamOut, SpiceExtraction
 from librelane.steps.netgen import LVS
 
-def get_pdk_root():
+def get_pdk_root(pdk="sky130A"):
     if root := os.environ.get("PDK_ROOT"):
         return root
+    family = "gf180mcu" if str(pdk).startswith("gf180") else "sky130"
     candidates = sorted(glob.glob(
-        os.path.expanduser("~/.ciel/ciel/sky130/versions/*/")
+        os.path.expanduser(f"~/.ciel/ciel/{family}/versions/*/")
     ))
     if candidates:
         return candidates[-1].rstrip("/")
-    raise RuntimeError("Cannot find PDK root. Set PDK_ROOT.")
+    raise RuntimeError(f"Cannot find PDK root for '{pdk}'. Set PDK_ROOT.")
 
 class MyFlow(SequentialFlow):
+    """Plain hardening flow (no hard macros)."""
     Steps = [
         Synthesis, Floorplan, IOPlacement,
         GlobalPlacement, DetailedPlacement,
@@ -34,15 +36,8 @@ class MyFlow(SequentialFlow):
         FillInsertion, STAMidPNR, WriteViews, StreamOut, SpiceExtraction, LVS,
     ]
 
-class ChipCoreFlow(SequentialFlow):
-    Steps = [
-        Synthesis, Floorplan, ManualMacroPlacement, IOPlacement, CutRows,
-        GlobalPlacement, DetailedPlacement,
-        CTS, GlobalRouting, DetailedRouting,
-        FillInsertion, STAMidPNR, WriteViews, StreamOut, SpiceExtraction, LVS,
-    ]
-
-class WrapperFlow(SequentialFlow):
+class MacroFlow(SequentialFlow):
+    """Hardening flow with manual hard-macro placement (chip core + wrapper)."""
     Steps = [
         Synthesis, Floorplan, ManualMacroPlacement, IOPlacement, CutRows,
         GlobalPlacement, DetailedPlacement,
@@ -188,6 +183,26 @@ def _load_clock_period_ns(config_path: Path, default: float = 10.0) -> float:
         return float(m.group(1))
     except ValueError:
         return default
+
+def _load_pdk(config_path: Path, default: str = "sky130A") -> str:
+    """
+    Read PDK from config.yaml without extra dependencies.
+    """
+    text = _read(config_path)
+    if not text:
+        return default
+    m = re.search(r"^\s*PDK\s*:\s*(\S+)", text, re.MULTILINE)
+    return m.group(1).strip() if m else default
+
+def _load_design_name(config_path: Path, default: str = "design") -> str:
+    """
+    Read DESIGN_NAME from config.yaml without extra dependencies.
+    """
+    text = _read(config_path)
+    if not text:
+        return default
+    m = re.search(r"^\s*DESIGN_NAME\s*:\s*(\S+)", text, re.MULTILINE)
+    return m.group(1).strip() if m else default
 
 def write_summary(run_dir: str, design_name: str, clock_period_ns: float) -> None:
     root = Path(run_dir)
@@ -431,44 +446,42 @@ def write_summary(run_dir: str, design_name: str, clock_period_ns: float) -> Non
 
 # ---------------------------------------------------------------------------
 
+_FLOWS = {"plain": MyFlow, "macro": MacroFlow}
+
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--chip", action="store_true", help="Build chip core then IO pad wrapper (Stage 2 + 3)")
-    parser.add_argument("--wrapper", action="store_true", help="Build only the IO pad wrapper (Stage 3, requires Stage 2 outputs)")
+    parser = argparse.ArgumentParser(
+        description="Run a LibreLane hardening flow for a single design config."
+    )
+    parser.add_argument("--config", default="config.yaml",
+                        help="Path to the LibreLane config.yaml")
+    parser.add_argument("--run-root", default=None,
+                        help="Directory for LibreLane step outputs (default: <config dir>/run)")
+    parser.add_argument("--design-name", default=None,
+                        help="Design name used in the summary (default: from config)")
+    parser.add_argument("--flow", choices=sorted(_FLOWS), default="plain",
+                        help="plain = no hard macros; macro = ManualMacroPlacement + CutRows")
+    parser.add_argument("--summary-out", default=None,
+                        help="Also copy the stage summary.txt to this path (for visibility)")
     args = parser.parse_args()
 
-    base_dir = Path(__file__).resolve().parent
-    pdk_root = get_pdk_root()
+    config_path = Path(args.config).resolve()
+    pdk = _load_pdk(config_path)
+    pdk_root = get_pdk_root(pdk)
 
-    def _run_wrapper():
-        wrapper_config = "config_wrapper.yaml"
-        wrapper_run_root = base_dir / "build" / "flow_wrapper"
-        flow3 = WrapperFlow(wrapper_config, pdk_root=pdk_root)
-        flow3.start(_force_run_dir=str(wrapper_run_root), overwrite=True)
-        summary_dir3 = _resolve_run_directory(wrapper_run_root) or wrapper_run_root
-        write_summary(str(summary_dir3), design_name="chip_top",
-                      clock_period_ns=_load_clock_period_ns(base_dir / wrapper_config))
+    run_root = (Path(args.run_root).resolve()
+                if args.run_root else config_path.parent / "run")
+    design_name = args.design_name or _load_design_name(config_path)
 
-    if args.wrapper:
-        _run_wrapper()
-    elif args.chip:
-        # Stage 2: harden chip core (SPI + DebugUnit + Proj2Xcel macro, no IO cells)
-        chipcore_config = "config_chipcore.yaml"
-        chipcore_run_root = base_dir / "build" / "flow_chipcore"
-        flow2 = ChipCoreFlow(chipcore_config, pdk_root=pdk_root)
-        flow2.start(_force_run_dir=str(chipcore_run_root), overwrite=True)
-        summary_dir2 = _resolve_run_directory(chipcore_run_root) or chipcore_run_root
-        write_summary(str(summary_dir2), design_name="proj2_Proj2XcelChip",
-                      clock_period_ns=_load_clock_period_ns(base_dir / chipcore_config))
+    flow = _FLOWS[args.flow](str(config_path), pdk_root=pdk_root)
+    flow.start(_force_run_dir=str(run_root), overwrite=True)
 
-        # Stage 3: harden IO pad ring wrapper around Stage 2 macro
-        _run_wrapper()
-    else:
-        config_file = "config.yaml"
-        run_root = base_dir / "build" / "flow"
-        flow = MyFlow(config_file, pdk_root=pdk_root)
-        flow.start(_force_run_dir=str(run_root), overwrite=True)
-        summary_dir = _resolve_run_directory(run_root) or run_root
-        write_summary(str(summary_dir), design_name="Proj2Xcel",
-                      clock_period_ns=_load_clock_period_ns(base_dir / config_file))
+    summary_dir = _resolve_run_directory(run_root) or run_root
+    write_summary(str(summary_dir), design_name=design_name,
+                  clock_period_ns=_load_clock_period_ns(config_path))
+
+    if args.summary_out:
+        src = summary_dir / "summary.txt"
+        if src.exists():
+            Path(args.summary_out).write_text(src.read_text())
+            print(f"[summary] Also written to {args.summary_out}")

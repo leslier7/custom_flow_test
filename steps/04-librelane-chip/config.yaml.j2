@@ -1,0 +1,37 @@
+DESIGN_NAME: {{ chip.design_name }}
+PDK: {{ pdk }}
+{% if std_cell_library %}
+STD_CELL_LIBRARY: {{ std_cell_library }}
+{% endif %}
+VERILOG_FILES:
+  - {{ chip.sv2v_out }}
+EXTRA_VERILOG_MODELS:
+{% for f in chip.extra_verilog_models %}
+  - {{ f }}
+{% endfor %}
+EXTRA_LEFS:
+{% for f in chip.extra_lefs %}
+  - {{ f }}
+{% endfor %}
+EXTRA_GDS:
+{% for f in chip.extra_gds %}
+  - {{ f }}
+{% endfor %}
+
+FP_SIZING: absolute
+DIE_AREA: {{ chip.die_area }}
+CORE_AREA: {{ chip.core_area }}
+
+MACRO_PLACEMENT_CFG: dir::{{ chip.macro_placement_cfg }}
+
+{% if clock_port %}
+CLOCK_PORT: {{ clock_port }}
+CLOCK_PERIOD: {{ clock_period }}
+{% endif %}
+
+MAGIC_EXT_USE_GDS: true
+LVS_INCLUDE_MARCO_NETLISTS: true
+LVS_IGNORE_CELLS:
+{% for cell in lvs_ignore_cells_resolved %}
+  - {{ cell }}
+{% endfor %}
