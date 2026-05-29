@@ -1,0 +1,34 @@
+DESIGN_NAME: proj2_Proj2XcelChip
+PDK: sky130A
+
+VERILOG_FILES:
+  - dir::build/sv2v_chip_core/Proj2XcelChipCore.v
+
+EXTRA_VERILOG_MODELS:
+  - dir::build/sv2v/Proj2Xcel.v
+
+EXTRA_LEFS:
+  - dir::build/flow/final/lef/Proj2Xcel.openroad.lef
+
+EXTRA_GDS:
+  - dir::build/flow/final/gds/Proj2Xcel.gds
+
+FP_SIZING: absolute
+DIE_AREA: [0, 0, 760, 760]
+CORE_AREA: [10.88, 10.88, 749.12, 749.12]
+
+MACRO_PLACEMENT_CFG: dir::macro_placement.cfg
+
+CLOCK_PORT: clk
+CLOCK_PERIOD: 10
+
+MAGIC_EXT_USE_GDS: true
+LVS_INCLUDE_MARCO_NETLISTS: true
+
+LVS_IGNORE_CELLS:
+  - sky130_fd_sc_hd__fill_1
+  - sky130_fd_sc_hd__fill_2
+  - sky130_fd_sc_hd__fill_4
+  - sky130_fd_sc_hd__fill_8
+  - sky130_fd_sc_hd__decap_3
+  - sky130_fd_sc_hd__diode_2

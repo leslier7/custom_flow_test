@@ -7,11 +7,12 @@ from pathlib import Path
 from librelane.flows import SequentialFlow
 from librelane.steps.yosys import Synthesis
 from librelane.steps.openroad import (
-    Floorplan, IOPlacement,
+    Floorplan, IOPlacement, CutRows,
     GlobalPlacement, DetailedPlacement,
     CTS, GlobalRouting, DetailedRouting,
     FillInsertion, STAMidPNR, WriteViews,
 )
+from librelane.steps.odb import ManualMacroPlacement
 from librelane.steps.magic import StreamOut, SpiceExtraction
 from librelane.steps.netgen import LVS
 
@@ -28,6 +29,22 @@ def get_pdk_root():
 class MyFlow(SequentialFlow):
     Steps = [
         Synthesis, Floorplan, IOPlacement,
+        GlobalPlacement, DetailedPlacement,
+        CTS, GlobalRouting, DetailedRouting,
+        FillInsertion, STAMidPNR, WriteViews, StreamOut, SpiceExtraction, LVS,
+    ]
+
+class ChipCoreFlow(SequentialFlow):
+    Steps = [
+        Synthesis, Floorplan, ManualMacroPlacement, IOPlacement, CutRows,
+        GlobalPlacement, DetailedPlacement,
+        CTS, GlobalRouting, DetailedRouting,
+        FillInsertion, STAMidPNR, WriteViews, StreamOut, SpiceExtraction, LVS,
+    ]
+
+class WrapperFlow(SequentialFlow):
+    Steps = [
+        Synthesis, Floorplan, ManualMacroPlacement, IOPlacement, CutRows,
         GlobalPlacement, DetailedPlacement,
         CTS, GlobalRouting, DetailedRouting,
         FillInsertion, STAMidPNR, WriteViews, StreamOut, SpiceExtraction, LVS,
@@ -414,45 +431,44 @@ def write_summary(run_dir: str, design_name: str, clock_period_ns: float) -> Non
 
 # ---------------------------------------------------------------------------
 
-def _chip_io_overrides(pdk_root: str) -> dict:
-    io_ref = Path(pdk_root) / "sky130A" / "libs.ref" / "sky130_fd_io"
-    return {
-        "EXTRA_LEFS": [
-            str(io_ref / "lef" / "sky130_fd_io.lef"),
-            str(io_ref / "lef" / "sky130_ef_io.lef"),
-        ],
-        "EXTRA_GDS_FILES": [
-            str(io_ref / "gds" / "sky130_fd_io.gds"),
-        ],
-        "VERILOG_FILES_BLACKBOX": [
-            str(io_ref / "verilog" / "sky130_fd_io__blackbox.v"),
-            str(io_ref / "verilog" / "sky130_ef_io.v"),
-        ],
-    }
-
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--chip", action="store_true", help="Build with IO pads (chip-level)")
+    parser.add_argument("--chip", action="store_true", help="Build chip core then IO pad wrapper (Stage 2 + 3)")
+    parser.add_argument("--wrapper", action="store_true", help="Build only the IO pad wrapper (Stage 3, requires Stage 2 outputs)")
     args = parser.parse_args()
 
     base_dir = Path(__file__).resolve().parent
     pdk_root = get_pdk_root()
 
-    if args.chip:
-        config_file = "config_chip.yaml"
-        run_root = base_dir / "build" / "flow_chip"
-        design_name = "Proj2Xcel_chip"
-        config = [config_file, _chip_io_overrides(pdk_root)]
+    def _run_wrapper():
+        wrapper_config = "config_wrapper.yaml"
+        wrapper_run_root = base_dir / "build" / "flow_wrapper"
+        flow3 = WrapperFlow(wrapper_config, pdk_root=pdk_root)
+        flow3.start(_force_run_dir=str(wrapper_run_root), overwrite=True)
+        summary_dir3 = _resolve_run_directory(wrapper_run_root) or wrapper_run_root
+        write_summary(str(summary_dir3), design_name="chip_top",
+                      clock_period_ns=_load_clock_period_ns(base_dir / wrapper_config))
+
+    if args.wrapper:
+        _run_wrapper()
+    elif args.chip:
+        # Stage 2: harden chip core (SPI + DebugUnit + Proj2Xcel macro, no IO cells)
+        chipcore_config = "config_chipcore.yaml"
+        chipcore_run_root = base_dir / "build" / "flow_chipcore"
+        flow2 = ChipCoreFlow(chipcore_config, pdk_root=pdk_root)
+        flow2.start(_force_run_dir=str(chipcore_run_root), overwrite=True)
+        summary_dir2 = _resolve_run_directory(chipcore_run_root) or chipcore_run_root
+        write_summary(str(summary_dir2), design_name="proj2_Proj2XcelChip",
+                      clock_period_ns=_load_clock_period_ns(base_dir / chipcore_config))
+
+        # Stage 3: harden IO pad ring wrapper around Stage 2 macro
+        _run_wrapper()
     else:
         config_file = "config.yaml"
         run_root = base_dir / "build" / "flow"
-        design_name = "Proj2Xcel"
-        config = config_file
-
-    flow = MyFlow(config, pdk_root=pdk_root)
-    flow.start(_force_run_dir=str(run_root), overwrite=True)
-
-    summary_dir = _resolve_run_directory(run_root) or run_root
-    clock_period_ns = _load_clock_period_ns(base_dir / config_file)
-    write_summary(str(summary_dir), design_name=design_name, clock_period_ns=clock_period_ns)
+        flow = MyFlow(config_file, pdk_root=pdk_root)
+        flow.start(_force_run_dir=str(run_root), overwrite=True)
+        summary_dir = _resolve_run_directory(run_root) or run_root
+        write_summary(str(summary_dir), design_name="Proj2Xcel",
+                      clock_period_ns=_load_clock_period_ns(base_dir / config_file))

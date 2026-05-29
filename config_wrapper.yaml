@@ -1,0 +1,39 @@
+DESIGN_NAME: chip_top
+PDK: sky130A
+
+VERILOG_FILES:
+  - dir::verilog/rtl/chip_top.v
+
+EXTRA_VERILOG_MODELS:
+  - dir::build/flow_chipcore/final/nl/proj2_Proj2XcelChip.nl.v
+  - /home/leslier/.ciel/ciel/sky130/versions/8afc8346a57fe1ab7934ba5a6056ea8b43078e71/sky130A/libs.ref/sky130_fd_io/verilog/sky130_fd_io__blackbox.v
+  - /home/leslier/.ciel/ciel/sky130/versions/8afc8346a57fe1ab7934ba5a6056ea8b43078e71/sky130A/libs.ref/sky130_fd_io/verilog/sky130_ef_io.v
+
+EXTRA_LEFS:
+  - dir::build/flow_chipcore/final/lef/proj2_Proj2XcelChip.openroad.lef
+  - /home/leslier/.ciel/ciel/sky130/versions/8afc8346a57fe1ab7934ba5a6056ea8b43078e71/sky130A/libs.ref/sky130_fd_io/lef/sky130_fd_io.lef
+  - /home/leslier/.ciel/ciel/sky130/versions/8afc8346a57fe1ab7934ba5a6056ea8b43078e71/sky130A/libs.ref/sky130_fd_io/lef/sky130_ef_io.lef
+
+EXTRA_GDS:
+  - dir::build/flow_chipcore/final/gds/proj2_Proj2XcelChip.gds
+  - /home/leslier/.ciel/ciel/sky130/versions/8afc8346a57fe1ab7934ba5a6056ea8b43078e71/sky130A/libs.ref/sky130_fd_io/gds/sky130_fd_io.gds
+
+FP_SIZING: absolute
+DIE_AREA: [0, 0, 1280, 1280]
+CORE_AREA: [200, 200, 1080, 1080]
+
+MACRO_PLACEMENT_CFG: dir::macro_placement_wrapper.cfg
+
+CLOCK_PORT: clk
+CLOCK_PERIOD: 10
+
+MAGIC_EXT_USE_GDS: true
+LVS_INCLUDE_MARCO_NETLISTS: true
+
+LVS_IGNORE_CELLS:
+  - sky130_fd_sc_hd__fill_1
+  - sky130_fd_sc_hd__fill_2
+  - sky130_fd_sc_hd__fill_4
+  - sky130_fd_sc_hd__fill_8
+  - sky130_fd_sc_hd__decap_3
+  - sky130_fd_sc_hd__diode_2
